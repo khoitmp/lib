@@ -1,0 +1,15 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Version>1.0.11</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Linq.Dynamic.Core" />
+    <PackageReference Include="Kernel.Lib" />
+    <PackageReference Include="GenericRepository.Lib" />
+    <PackageReference Include="UserContext.Lib" />
+  </ItemGroup>
+
+</Project>
