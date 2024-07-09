@@ -1,68 +1,57 @@
-namespace RateLimit.Lib.Middleware;
+namespace RateLimit.Lib.Middleware.TokenBucket.Redis;
 
 /// <summary>
-/// - Pros:
+/// A token bucket is a container that has pre-defiend capacity. Tokens are put in
+/// the bucket at preset rates periodically. Once the bucket is full, no more tokens
+/// are added
+///
+/// * Pros:
 ///     + Memory efficient
-///     + Token bucket allows a burst of traffic for short periods. A request can go through
-///     as long as there are tokens left
-/// - Cons:
-///     + Two parameters in the algorithm are bucket size and token refill rate. However, it might
-/// be challenging to tune them properly
-///  
-/// *NOTE: This version not supporting in distributed environment, StringGetAsync & StringSetAsync cannot handle race condition (alternative approach 
-/// could be using Lua script or Redis Sorted Set)
+///     + Token bucket allows a burst of traffic for short periods. A request can go 
+///     through as long as there are tokens left
+/// * Cons:
+///     + Two parameters in the algorithm are bucket size and token refill rate. However, 
+///     it might be challenging to tune them properly
+///
+/// *NOTE: This version not supporting in distributed environment, StringGetAsync & 
+/// StringSetAsync cannot handle race condition (alternative approach could be using 
+/// Lua script or Redis Sorted Set)
 /// </summary>
-public class TokenBucketRateLimitingMiddleware
+public class TokenBucketRateLimitingMiddleware : BaseRateLimitingMiddleware
 {
     private readonly RequestDelegate _next;
     private readonly IDatabase _redisDb;
 
     // Max tokens in the bucket
-    private const int MAX_TOKENS = 10;
+    private static int MAX_TOKENS;
 
     // Interval in seconds to refill tokens
-    private const int REFILL_INTERVAL_SECONDS = 1;
+    private static int REFILL_INTERVAL_SECONDS;
 
     // Number of tokens to add each interval
-    private const int REFILL_TOKENS = 10;
+    private static int REFILL_TOKENS;
 
-    public TokenBucketRateLimitingMiddleware(RequestDelegate next, IConnectionMultiplexer redis)
+    public TokenBucketRateLimitingMiddleware(RequestDelegate next, IConfiguration configuration, IConnectionMultiplexer redis)
+        : base(next)
     {
         _next = next;
         _redisDb = redis.GetDatabase();
+
+        MAX_TOKENS = Convert.ToInt32(configuration["RateLimit:Limit"] ?? "10");
+        REFILL_INTERVAL_SECONDS = Convert.ToInt32(configuration["RateLimit:ResetIntervalSeconds"] ?? "1");
+        REFILL_TOKENS = Convert.ToInt32(configuration["RateLimit:Refill"] ?? "10");
     }
 
-    public async Task InvokeAsync(HttpContext context)
+    protected override async Task<bool> IsRequestAllowedAsync(string key)
     {
-        string userId = context.Request.Headers[HeaderKeys.X_USER_ID];
-        if (string.IsNullOrEmpty(userId))
-        {
-            context.Response.StatusCode = StatusCodes.Status400BadRequest;
-            await context.Response.WriteAsync("Missing x-user-id");
-            return;
-        }
-
-        if (!await IsRequestAllowedAsync(userId))
-        {
-            context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
-            await context.Response.WriteAsync("Rate limit exceeded");
-            return;
-        }
-
-        await _next(context);
-    }
-
-    private async Task<bool> IsRequestAllowedAsync(string key)
-    {
-        var cacheKey = $"token_bucket_{key}";
-        var tokenKey = $"{cacheKey}_tokens";
-        var timestampKey = $"{cacheKey}_timestamp";
+        var tokenCacheKey = CacheKeys.TOKEN_BUCKET_TOKENS.GetString(key);
+        var tsCacheKey = CacheKeys.TOKEN_BUCKET_TIMESTAMP.GetString(key);
 
         var transaction = _redisDb.CreateTransaction();
 
         // Get the current token count and the last refill timestamp
-        var tokenCountTask = transaction.StringGetAsync(tokenKey);
-        var lastRefillTimestampTask = transaction.StringGetAsync(timestampKey);
+        var tokenCountTask = transaction.StringGetAsync(tokenCacheKey);
+        var lastRefillTimestampTask = transaction.StringGetAsync(tsCacheKey);
 
         // Execute the transaction
         if (!await transaction.ExecuteAsync())
@@ -83,7 +72,7 @@ public class TokenBucketRateLimitingMiddleware
         long currentTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         long elapsedTime = currentTime - lastRefillTimestamp;
 
-        // Always round down
+        // Always round down (the result can either be 0 or REFILL_TOKENS)
         int tokensToAdd = (int)(elapsedTime / REFILL_INTERVAL_SECONDS) * REFILL_TOKENS;
 
         // Update the token count
@@ -100,8 +89,8 @@ public class TokenBucketRateLimitingMiddleware
 
         // Update Redis with the new token count and timestamp
         var updateTransaction = _redisDb.CreateTransaction();
-        await updateTransaction.StringSetAsync(tokenKey, tokenCount);
-        await updateTransaction.StringSetAsync(timestampKey, currentTime);
+        await updateTransaction.StringSetAsync(tokenCacheKey, tokenCount);
+        await updateTransaction.StringSetAsync(tsCacheKey, currentTime);
 
         // Execute the update transaction
         var updateResult = await updateTransaction.ExecuteAsync();

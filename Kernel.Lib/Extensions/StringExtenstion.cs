@@ -6,4 +6,9 @@ public static class StringExtenstion
     {
         return ((object)input).ConvertTo<T>();
     }
+
+    public static string GetString(this string text, params object[] args)
+    {
+        return string.Format(text, args);
+    }
 }
